@@ -35,7 +35,7 @@ class TwoPhaseTrainer:
         
         # Best model tracking
         self.best_val_loss = float('inf')
-        self.patience = 5
+        self.patience = 7  # Tăng patience vì 2-phase training
         self.patience_counter = 0
     
     def create_optimizer(self, lr=2e-3):
@@ -179,6 +179,12 @@ class TwoPhaseTrainer:
         """Phase 2: Mỗi epoch sample 50k từ toàn bộ data"""
         print("\n=== PHASE 2: Training với sampling mỗi epoch ===")
         
+        # Reset early stopping cho Phase 2  
+        self.best_val_loss = float('inf')
+        self.patience_counter = 0
+        phase2_patience = 8  # Patience cao hơn cho Phase 2
+        print(f"Reset early stopping cho Phase 2 (patience: {phase2_patience})")
+        
         optimizer = self.create_optimizer(lr=1e-3)  # LR thấp hơn cho phase 2
         scheduler = self.create_scheduler(optimizer, T_max=num_epochs)
         
@@ -248,7 +254,7 @@ class TwoPhaseTrainer:
             else:
                 self.patience_counter += 1
                 
-            if self.patience_counter >= self.patience:
+            if self.patience_counter >= phase2_patience:
                 print(f"Early stopping sau {epoch+1} epochs")
                 break
         
