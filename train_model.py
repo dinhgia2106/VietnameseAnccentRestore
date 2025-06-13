@@ -8,6 +8,289 @@ import os
 import json
 from model_architecture import VietnameseAccentRestorer
 
+class TwoPhaseTrainer:
+    """
+    Trainer 2 phase cho việc học Vietnamese accent restoration
+    """
+    
+    def __init__(self, model, device='cpu'):
+        self.model = model
+        self.device = device
+        self.model.model.to(device)
+        
+        # Simple loss function
+        self.criterion = nn.CrossEntropyLoss(ignore_index=0)
+        
+        # Training history
+        self.history = {
+            'phase1_train_loss': [],
+            'phase1_val_loss': [],
+            'phase1_train_acc': [],
+            'phase1_val_acc': [],
+            'phase2_train_loss': [],
+            'phase2_val_loss': [],
+            'phase2_train_acc': [],
+            'phase2_val_acc': []
+        }
+        
+        # Best model tracking
+        self.best_val_loss = float('inf')
+        self.patience = 5
+        self.patience_counter = 0
+    
+    def create_optimizer(self, lr=2e-3):
+        """Tạo optimizer mới cho mỗi phase"""
+        return optim.AdamW(
+            self.model.model.parameters(),
+            lr=lr,
+            weight_decay=1e-4,
+            betas=(0.9, 0.95)
+        )
+    
+    def create_scheduler(self, optimizer, T_max=15):
+        """Tạo scheduler mới cho mỗi phase"""
+        return optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=T_max, eta_min=1e-5
+        )
+    
+    def calculate_accuracy(self, predictions, targets, lengths):
+        """Tính accuracy nhanh"""
+        predictions = predictions.argmax(dim=-1)
+        correct = 0
+        total = 0
+        
+        for i, length in enumerate(lengths):
+            pred = predictions[i][:length]
+            target = targets[i][:length]
+            mask = target != 0
+            if mask.sum() > 0:
+                correct += ((pred == target) * mask).sum().item()
+                total += mask.sum().item()
+        
+        return correct / total if total > 0 else 0
+    
+    def train_epoch(self, train_loader, optimizer):
+        """Training epoch"""
+        self.model.model.train()
+        total_loss = 0
+        total_acc = 0
+        
+        for batch in tqdm(train_loader, desc="Training"):
+            input_ids = batch['input_ids'].to(self.device)
+            target_ids = batch['target_ids'].to(self.device)
+            lengths = batch['length']
+            
+            optimizer.zero_grad()
+            
+            # Forward pass
+            outputs = self.model.model(input_ids)
+            outputs_flat = outputs.view(-1, outputs.size(-1))
+            targets_flat = target_ids.view(-1)
+            
+            # Loss
+            loss = self.criterion(outputs_flat, targets_flat)
+            
+            # Accuracy
+            acc = self.calculate_accuracy(outputs, target_ids, lengths)
+            
+            # Backward
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.model.model.parameters(), max_norm=0.5)
+            optimizer.step()
+            
+            total_loss += loss.item()
+            total_acc += acc
+        
+        return total_loss / len(train_loader), total_acc / len(train_loader)
+    
+    def validate_epoch(self, val_loader):
+        """Validation epoch"""
+        self.model.model.eval()
+        total_loss = 0
+        total_acc = 0
+        
+        with torch.no_grad():
+            for batch in tqdm(val_loader, desc="Validation"):
+                input_ids = batch['input_ids'].to(self.device)
+                target_ids = batch['target_ids'].to(self.device)
+                lengths = batch['length']
+                
+                outputs = self.model.model(input_ids)
+                outputs_flat = outputs.view(-1, outputs.size(-1))
+                targets_flat = target_ids.view(-1)
+                
+                loss = self.criterion(outputs_flat, targets_flat)
+                acc = self.calculate_accuracy(outputs, target_ids, lengths)
+                
+                total_loss += loss.item()
+                total_acc += acc
+        
+        return total_loss / len(val_loader), total_acc / len(val_loader)
+    
+    def train_phase1(self, train_loader, val_loader, num_epochs, save_dir="models"):
+        """Phase 1: Train với full Viet74K data"""
+        print("=== PHASE 1: Training với full Viet74K data ===")
+        
+        optimizer = self.create_optimizer(lr=2e-3)
+        scheduler = self.create_scheduler(optimizer, T_max=num_epochs)
+        
+        for epoch in range(num_epochs):
+            print(f"\nPhase 1 - Epoch {epoch+1}/{num_epochs}")
+            
+            # Training
+            train_loss, train_acc = self.train_epoch(train_loader, optimizer)
+            
+            # Validation  
+            val_loss, val_acc = self.validate_epoch(val_loader)
+            
+            # Update scheduler
+            scheduler.step()
+            
+            # Save history
+            self.history['phase1_train_loss'].append(train_loss)
+            self.history['phase1_val_loss'].append(val_loss)
+            self.history['phase1_train_acc'].append(train_acc)
+            self.history['phase1_val_acc'].append(val_acc)
+            
+            print(f"Train: Loss={train_loss:.4f}, Acc={train_acc:.4f}")
+            print(f"Val: Loss={val_loss:.4f}, Acc={val_acc:.4f}")
+            print(f"LR: {optimizer.param_groups[0]['lr']:.6f}")
+            
+            # Early stopping
+            if val_loss < self.best_val_loss:
+                self.best_val_loss = val_loss
+                self.patience_counter = 0
+                
+                # Save best model
+                best_path = os.path.join(save_dir, "phase1_best_model.pth")
+                os.makedirs(os.path.dirname(best_path), exist_ok=True)
+                self.model.save_model(best_path)
+                print(f"Saved Phase 1 best: {best_path}")
+            else:
+                self.patience_counter += 1
+                
+            if self.patience_counter >= self.patience:
+                print(f"Early stopping sau {epoch+1} epochs")
+                break
+        
+        print("Phase 1 hoàn thành!")
+    
+    def train_phase2(self, all_data, val_loader, num_epochs, samples_per_epoch=50000, save_dir="models"):
+        """Phase 2: Mỗi epoch sample 50k từ toàn bộ data"""
+        print("\n=== PHASE 2: Training với sampling mỗi epoch ===")
+        
+        optimizer = self.create_optimizer(lr=1e-3)  # LR thấp hơn cho phase 2
+        scheduler = self.create_scheduler(optimizer, T_max=num_epochs)
+        
+        input_texts, target_texts = all_data
+        total_samples = len(input_texts)
+        print(f"Tổng data: {total_samples} samples, mỗi epoch: {samples_per_epoch} samples")
+        
+        for epoch in range(num_epochs):
+            print(f"\nPhase 2 - Epoch {epoch+1}/{num_epochs}")
+            
+            # Random sampling 50k samples
+            import random
+            indices = random.sample(range(total_samples), min(samples_per_epoch, total_samples))
+            epoch_inputs = [input_texts[i] for i in indices]
+            epoch_targets = [target_texts[i] for i in indices]
+            
+            # Tạo dataset cho epoch này
+            epoch_dataset = AccentDataset(
+                epoch_inputs, epoch_targets, self.model.char_to_idx, max_length=128
+            )
+            
+            batch_size = 128 if self.device.type == 'cuda' else 64
+            epoch_loader = DataLoader(
+                epoch_dataset,
+                batch_size=batch_size,
+                shuffle=True,
+                num_workers=2,
+                pin_memory=True if self.device.type == 'cuda' else False
+            )
+            
+            # Training
+            train_loss, train_acc = self.train_epoch(epoch_loader, optimizer)
+            
+            # Validation
+            val_loss, val_acc = self.validate_epoch(val_loader)
+            
+            # Update scheduler
+            scheduler.step()
+            
+            # Save history
+            self.history['phase2_train_loss'].append(train_loss)
+            self.history['phase2_val_loss'].append(val_loss)
+            self.history['phase2_train_acc'].append(train_acc)
+            self.history['phase2_val_acc'].append(val_acc)
+            
+            print(f"Train: Loss={train_loss:.4f}, Acc={train_acc:.4f}")
+            print(f"Val: Loss={val_loss:.4f}, Acc={val_acc:.4f}")
+            print(f"LR: {optimizer.param_groups[0]['lr']:.6f}")
+            
+            # Save checkpoint mỗi epoch
+            if epoch % 5 == 0:
+                checkpoint_path = os.path.join(save_dir, f"phase2_epoch_{epoch+1}.pth")
+                os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
+                self.model.save_model(checkpoint_path)
+                print(f"Saved checkpoint: {checkpoint_path}")
+            
+            # Early stopping
+            if val_loss < self.best_val_loss:
+                self.best_val_loss = val_loss
+                self.patience_counter = 0
+                
+                # Save best model
+                best_path = os.path.join(save_dir, "phase2_best_model.pth")
+                os.makedirs(os.path.dirname(best_path), exist_ok=True)
+                self.model.save_model(best_path)
+                print(f"Saved Phase 2 best: {best_path}")
+            else:
+                self.patience_counter += 1
+                
+            if self.patience_counter >= self.patience:
+                print(f"Early stopping sau {epoch+1} epochs")
+                break
+        
+        print("Phase 2 hoàn thành!")
+    
+    def train_two_phase(self, viet74k_data, corpus_data, phase1_epochs=10, phase2_epochs=30, save_dir="models"):
+        """Training 2 phase complete"""
+        os.makedirs(save_dir, exist_ok=True)
+        
+        print("Bắt đầu 2-Phase Training!")
+        print(f"Device: {self.device}")
+        print(f"Tham số: {sum(p.numel() for p in self.model.model.parameters()):,}")
+        
+        # Chuẩn bị data Phase 1
+        input_texts, target_texts = viet74k_data
+        
+        # Split validation set 10k
+        val_size = min(10000, len(input_texts) // 10)
+        train_inputs = input_texts[val_size:]
+        train_targets = target_texts[val_size:]
+        val_inputs = input_texts[:val_size]
+        val_targets = target_texts[:val_size]
+        
+        print(f"Phase 1 - Train: {len(train_inputs)}, Val: {len(val_inputs)}")
+        
+        # Dataset Phase 1
+        train_dataset = AccentDataset(train_inputs, train_targets, self.model.char_to_idx, 128)
+        val_dataset = AccentDataset(val_inputs, val_targets, self.model.char_to_idx, 128)
+        
+        batch_size = 128 if self.device.type == 'cuda' else 64
+        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=2)
+        val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=2)
+        
+        # Phase 1 Training
+        self.train_phase1(train_loader, val_loader, phase1_epochs, save_dir)
+        
+        # Phase 2 Training với corpus data
+        if corpus_data:
+            self.train_phase2(corpus_data, val_loader, phase2_epochs, save_dir=save_dir)
+        
+        print("2-Phase Training hoàn thành!")
+
 class AccentRestorationTrainer:
     """
      Trainer tối ưu cho tốc độ training
@@ -222,75 +505,81 @@ def load_training_data(data_file):
     
     return input_texts, target_texts
 
+def load_viet74k_data(data_file):
+    """Load data từ Viet74K.txt"""
+    from unidecode import unidecode
+    input_texts = []
+    target_texts = []
+    
+    with open(data_file, 'r', encoding='utf-8') as f:
+        for line in f:
+            line = line.strip()
+            if line and len(line) >= 2:  # Lọc từ có ít nhất 2 ký tự
+                # Tạo cặp (không dấu, có dấu)
+                with_accent = line
+                no_accent = unidecode(with_accent)
+                
+                # Chỉ thêm nếu khác nhau (có dấu)
+                if no_accent != with_accent and 2 <= len(with_accent) <= 50:
+                    input_texts.append(no_accent)
+                    target_texts.append(with_accent)
+    
+    return input_texts, target_texts
+
 def main():
-    """ training main"""
+    """ 2-Phase training main"""
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Device: {device}")
     
-    # Load data
-    data_file = "data/training_pairs.txt"
-    if not os.path.exists(data_file):
-        print("Tạo dữ liệu training...")
-        from data_preprocessing import main as preprocess_main
-        preprocess_main()
+    # Load Viet74K data cho Phase 1
+    viet74k_file = "data/Viet74K.txt"
+    if not os.path.exists(viet74k_file):
+        print(f"Không tìm thấy {viet74k_file}")
+        return
+        
+    print("Loading Viet74K data...")
+    viet74k_inputs, viet74k_targets = load_viet74k_data(viet74k_file)
+    print(f"Viet74K data: {len(viet74k_inputs)} samples")
     
-    print("Loading data...")
-    input_texts, target_texts = load_training_data(data_file)
+    # Load corpus data cho Phase 2 (nếu có)
+    corpus_data = None
+    corpus_file = "data/training_pairs.txt"
+    if os.path.exists(corpus_file):
+        print("Loading corpus data cho Phase 2...")
+        corpus_inputs, corpus_targets = load_training_data(corpus_file)
+        corpus_data = (corpus_inputs, corpus_targets)
+        print(f"Corpus data: {len(corpus_inputs)} samples")
+    else:
+        print("Tạo dữ liệu corpus...")
+        try:
+            from data_preprocessing import main as preprocess_main
+            preprocess_main()
+            corpus_inputs, corpus_targets = load_training_data(corpus_file)
+            corpus_data = (corpus_inputs, corpus_targets)
+            print(f"Corpus data: {len(corpus_inputs)} samples")
+        except:
+            print("Không thể tạo corpus data, chỉ chạy Phase 1")
     
-    # Giới hạn data để training nhanh
-    max_samples = 50000  # Giảm từ full dataset
-    if len(input_texts) > max_samples:
-        input_texts = input_texts[:max_samples]
-        target_texts = target_texts[:max_samples]
+    # Model
+    model = VietnameseAccentRestorer(use_enhanced_model=False)
     
-    print(f"Sử dụng {len(input_texts)} samples cho  training")
+    # Two-phase trainer
+    trainer = TwoPhaseTrainer(model, device)
     
-    # Model đơn giản hơn
-    model = VietnameseAccentRestorer(use_enhanced_model=False)  # Dùng model cũ
+    # Training config
+    phase1_epochs = 15  # Phase 1: học full Viet74K
+    phase2_epochs = 30  # Phase 2: sampling epoch
     
-    # Train/val split
-    train_inputs, val_inputs, train_targets, val_targets = train_test_split(
-        input_texts, target_texts, test_size=0.1, random_state=42
+    # Bắt đầu 2-phase training
+    trainer.train_two_phase(
+        viet74k_data=(viet74k_inputs, viet74k_targets),
+        corpus_data=corpus_data,
+        phase1_epochs=phase1_epochs,
+        phase2_epochs=phase2_epochs,
+        save_dir="models"
     )
     
-    print(f"Train: {len(train_inputs)}, Val: {len(val_inputs)}")
-    
-    #  dataset config
-    max_length = 128  # Giảm từ 256
-    
-    train_dataset = AccentDataset(
-        train_inputs, train_targets, model.char_to_idx, max_length
-    )
-    val_dataset = AccentDataset(
-        val_inputs, val_targets, model.char_to_idx, max_length
-    )
-    
-    # Larger batch size cho tốc độ
-    batch_size = 128 if device.type == 'cuda' else 64
-    
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=2,
-        pin_memory=True if device.type == 'cuda' else False
-    )
-    
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=2,
-        pin_memory=True if device.type == 'cuda' else False
-    )
-    
-    #  trainer
-    trainer = AccentRestorationTrainer(model, device)
-    
-    num_epochs = 20
-    trainer.train(train_loader, val_loader, num_epochs)
-    
-    print("Training hoàn thành!")
+    print("2-Phase Training hoàn thành!")
 
 if __name__ == "__main__":
     main() 
