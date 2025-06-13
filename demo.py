@@ -13,7 +13,7 @@ class VietnameseAccentDemo:
         Khởi tạo demo
         """
         print("Đang tải mô hình...")
-        self.restorer = VietnameseAccentRestorer(model_path)
+        self.restorer = VietnameseAccentRestorer(model_path, use_enhanced_model=False)
         
         if model_path and os.path.exists(model_path):
             print(f"Đã tải mô hình từ: {model_path}")

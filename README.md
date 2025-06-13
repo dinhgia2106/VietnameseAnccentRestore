@@ -4,7 +4,7 @@ Mô hình A-TCN (Acausal Temporal Convolutional Network) để phục hồi dấ
 
 ## Dữ liệu
 
-Tải về ở [đây](https://drive.google.com/file/d/1ovLbpvzSGrS4NDxZu8Ftdgc73uHzNQJf/view)
+Tải về ở [đây](https://drive.google.com/file/d/1ovLbpvzSGrS4NDxZu8Ftdgc73uHzNQJf/view) và đây [đây](https://github.com/duyet/vietnamese-wordlist/blob/master/Viet74K.txt)
 
 ## Cài đặt
 

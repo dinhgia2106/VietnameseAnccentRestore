@@ -179,10 +179,10 @@ def main():
     preprocessor = VietnameseDataPreprocessor()
     
     # Xử lý corpus sample
-    corpus_file = "data/corpus-sample-100k.txt"
+    corpus_file = "data/corpus-full.txt"
     output_file = "data/training_pairs.txt"
     
-    pairs = preprocessor.process_corpus(corpus_file, output_file, max_samples=100000)
+    pairs = preprocessor.process_corpus(corpus_file, output_file, max_samples=1000000)
     
     # Thống kê
     total_chars = sum(len(pair[0]) for pair in pairs)
