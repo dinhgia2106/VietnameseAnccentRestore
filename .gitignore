@@ -131,3 +131,6 @@ results/
 /wandb
 /mlruns
 /ngrams
+/corpus_splitted
+train_processed.json
+val_processed.json
