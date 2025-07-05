@@ -1,0 +1,62 @@
+{
+  "config": {
+    "model": {
+      "embedding_dim": 128,
+      "hidden_dim": 256,
+      "num_layers": 6,
+      "kernel_size": 3,
+      "dropout": 0.1,
+      "max_dilation": 32
+    },
+    "training": {
+      "batch_size": 32,
+      "learning_rate": 0.001,
+      "weight_decay": 0.0001,
+      "num_epochs": 1,
+      "max_length": 256,
+      "clip_grad_norm": 1.0
+    },
+    "data": {
+      "corpus_dir": "corpus_splitted",
+      "vocab_path": "vietnamese_char_vocab.json",
+      "train_split": 0.9,
+      "max_files": 2,
+      "max_samples_per_file": 100,
+      "num_workers": 0
+    },
+    "optimization": {
+      "lr_scheduler": "plateau",
+      "lr_decay_factor": 0.5,
+      "lr_patience": 5,
+      "warmup_steps": 1000
+    },
+    "early_stopping": {
+      "patience": 10,
+      "delta": 0.0001
+    },
+    "checkpointing": {
+      "output_dir": "test_output",
+      "save_every_n_epochs": 5,
+      "keep_last_n_checkpoints": 3
+    },
+    "logging": {
+      "log_every_n_steps": 100,
+      "eval_every_n_steps": 1000
+    },
+    "device": "cuda",
+    "inference": {
+      "temperature": 1.0,
+      "top_k": null
+    }
+  },
+  "history": [
+    {
+      "train_loss": 4.1429177125295,
+      "train_accuracy": 0.4655965169270833,
+      "val_loss": 1.4688974618911743,
+      "val_accuracy": 0.73046875
+    }
+  ],
+  "best_val_loss": 1.4688974618911743,
+  "total_epochs": 1
+}

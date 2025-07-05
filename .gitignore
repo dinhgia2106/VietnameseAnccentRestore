@@ -134,3 +134,6 @@ results/
 /corpus_splitted
 train_processed.json
 val_processed.json
+
+TODO.md
+PHASE*_SUMMARY.md
